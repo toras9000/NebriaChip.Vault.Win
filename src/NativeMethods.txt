@@ -1,0 +1,7 @@
+﻿CredWrite
+CredRead
+CredDelete
+CredEnumerate
+CredFree
+CredUICmdLinePromptForCredentials
+CredUIPromptForWindowsCredentials
