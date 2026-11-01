@@ -1,4 +1,5 @@
-﻿using System.Diagnostics.CodeAnalysis;
+﻿using System.Buffers;
+using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
@@ -47,8 +48,20 @@ public class PersistVaultAdapter
     /// <param name="name">資格情報名称</param>
     /// <param name="text">書き込むテキスト</param>
     /// <returns>書き込み成否</returns>
-    public bool WriteGenericText(string name, string text)
-        => this.adapter.Write(CredType.Generic, name, Encoding.UTF8.GetBytes(text), this.writeOptions);
+    public bool WriteGenericText(string name, ReadOnlySpan<char> text)
+    {
+        var encoder = Encoding.UTF8.GetEncoder();
+        var buffer = new ArrayBufferWriter<byte>();
+        try
+        {
+            encoder.Convert(text, writer: buffer, flush: true, out var _, out var _);
+            return this.adapter.Write(CredType.Generic, name, buffer.WrittenSpan, this.writeOptions);
+        }
+        finally
+        {
+            buffer.Clear();
+        }
+    }
 
     /// <summary>汎用資格情報にオブジェクトをシリアライズして書き込む</summary>
     /// <typeparam name="TObject">オブジェクトの型</typeparam>
@@ -60,8 +73,18 @@ public class PersistVaultAdapter
     [RequiresUnreferencedCode("This method uses the JsonSerializer.")]
     public bool WriteGenericObject<TObject>(string name, TObject obj, JsonSerializerOptions? options = null)
     {
-        var json = JsonSerializer.Serialize(obj, options);
-        return this.WriteGenericText(name, json);
+        var buffer = new ArrayBufferWriter<byte>();
+        using var writer = new Utf8JsonWriter(buffer);
+        try
+        {
+            JsonSerializer.Serialize(writer, obj, options);
+            writer.Flush();
+            return this.adapter.Write(CredType.Generic, name, buffer.WrittenSpan, this.writeOptions);
+        }
+        finally
+        {
+            buffer.Clear();
+        }
     }
 
     /// <summary>汎用資格情報にオブジェクトをシリアライズして書き込む</summary>
@@ -72,8 +95,18 @@ public class PersistVaultAdapter
     /// <returns>書き込み成否</returns>
     public bool WriteGenericObject<TObject>(string name, TObject obj, JsonTypeInfo<TObject> typeInfo)
     {
-        var json = JsonSerializer.Serialize(obj, typeInfo);
-        return this.WriteGenericText(name, json);
+        var buffer = new ArrayBufferWriter<byte>();
+        using var writer = new Utf8JsonWriter(buffer);
+        try
+        {
+            JsonSerializer.Serialize(writer, obj, typeInfo);
+            writer.Flush();
+            return this.adapter.Write(CredType.Generic, name, buffer.WrittenSpan, this.writeOptions);
+        }
+        finally
+        {
+            buffer.Clear();
+        }
     }
     #endregion
 

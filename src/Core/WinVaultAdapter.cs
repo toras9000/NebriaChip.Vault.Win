@@ -1,6 +1,7 @@
 ﻿using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using Windows.Win32;
+using Windows.Win32.Foundation;
 using Windows.Win32.Security.Credentials;
 
 namespace NebriaChip.Vault.Win.Core;
@@ -166,7 +167,7 @@ public class WinVaultAdapter
         {
             // 書き込み用データ作成
             var credential = new CREDENTIALW();
-            credential.Type = type.ToApiType();
+            credential.Type = credTypeToApi(type);
             credential.TargetName = (char*)pins.Add(name);
             credential.CredentialBlobSize = (uint)data.Length;
             credential.CredentialBlob = dataPtr;
@@ -210,7 +211,7 @@ public class WinVaultAdapter
             }
 
             // 書き込み
-            var flag = blob ? 0 : PInvokeExtensions.CRED_PRESERVE_CREDENTIAL_BLOB;
+            var flag = blob ? 0 : PInvokeConstants.CRED_PRESERVE_CREDENTIAL_BLOB;
             var result = PInvoke.CredWrite(in credential, flag);
             this.LastError = Marshal.GetLastPInvokeError();
 
@@ -230,7 +231,7 @@ public class WinVaultAdapter
         try
         {
             // 資格情報の読み取り
-            var result = PInvoke.CredRead(name, type.ToApiType(), out credPtr);
+            var result = PInvoke.CredRead(name, credTypeToApi(type), out credPtr);
             this.LastError = Marshal.GetLastPInvokeError();
 
             // 追加情報の出力を初期化
@@ -239,11 +240,18 @@ public class WinVaultAdapter
             // 視覚情報の読み取りが失敗していたら終える
             if (!result) return null;
 
-            // APIデータをデコードする
-            var decoded = decodeCred(credPtr, withExtra);
-            extra = decoded.extra;
+            try
+            {
+                // APIデータをデコードする
+                var decoded = decodeCred(credPtr, withExtra);
+                extra = decoded.extra;
 
-            return decoded.blob;
+                return decoded.blob;
+            }
+            finally
+            {
+                clearBlob(credPtr);
+            }
         }
         finally
         {
@@ -261,7 +269,7 @@ public class WinVaultAdapter
     /// <returns>削除成否</returns>
     private bool deleteCredCode(CredType type, string name)
     {
-        var credType = type.ToApiType();
+        var credType = credTypeToApi(type);
         var result = PInvoke.CredDelete(name, credType);
         this.LastError = Marshal.GetLastPInvokeError();
         return result;
@@ -288,14 +296,21 @@ public class WinVaultAdapter
             {
                 var credPtr = credArrayPtr[i];
 
-                // APIデータをデコードする
-                var decoded = decodeCred(credPtr, withExtra: true);
-                if (decoded.extra == null) continue;
+                try
+                {
+                    // APIデータをデコードする
+                    var decoded = decodeCred(credPtr, withExtra: true);
+                    if (decoded.extra == null) continue;
 
-                // デコードした結果を収集
-                var type = credPtr->Type.DecodeType();
-                var name = credPtr->TargetName.ToString();
-                items.Add(new(type, name, decoded.blob, decoded.extra));
+                    // デコードした結果を収集
+                    var type = credTypeFromApi(credPtr->Type);
+                    var name = credPtr->TargetName.ToString();
+                    items.Add(new(type, name, decoded.blob, decoded.extra));
+                }
+                finally
+                {
+                    clearBlob(credPtr);
+                }
             }
 
             return items.ToArray();
@@ -311,9 +326,9 @@ public class WinVaultAdapter
     }
     #endregion
 
-    #region 変化
+    #region 変換
     /// <summary>APIで読みだした資格情報データをデコードする</summary>
-    /// <param name="credPtr">デコード対象の</param>
+    /// <param name="credPtr">デコード対象のAPI資格情報</param>
     /// <param name="withExtra">追加情報をデコードするか否か</param>
     /// <returns>デコード結果の秘密データと追加情報</returns>
     private unsafe (byte[] blob, ReadExtra? extra) decodeCred(CREDENTIALW* credPtr, bool withExtra)
@@ -356,19 +371,13 @@ public class WinVaultAdapter
         return (blob, extra);
     }
     #endregion
-}
 
-/// <summary>P/Invoke 関連拡張データ</summary>
-file static class PInvokeExtensions
-{
-    /// <summary>更新データフラグ：BLOBを維持した更新</summary>
-    public const uint CRED_PRESERVE_CREDENTIAL_BLOB = 0x00000001;
-
+    #region ユーティリティ
     /// <summary>資格情報種別をAPI用の値に変換する</summary>
-    /// <param name="self">資格情報種別</param>
+    /// <param name="type">資格情報種別</param>
     /// <returns>API用資格情報種別</returns>
-    public static CRED_TYPE ToApiType(this CredType self)
-        => self switch
+    private CRED_TYPE credTypeToApi(CredType type)
+        => type switch
         {
             CredType.Generic => CRED_TYPE.CRED_TYPE_GENERIC,
             CredType.GenericCertificate => CRED_TYPE.CRED_TYPE_GENERIC_CERTIFICATE,
@@ -378,9 +387,11 @@ file static class PInvokeExtensions
             _ => throw new ArgumentException(nameof(CredType)),
         };
 
-
-    public static CredType DecodeType(this CRED_TYPE self)
-        => self switch
+    /// <summary>API用の資格情報種別をI/F値に変換する</summary>
+    /// <param name="type">API用資格情報種別</param>
+    /// <returns>資格情報種別</returns>
+    private CredType credTypeFromApi(CRED_TYPE type)
+        => type switch
         {
             CRED_TYPE.CRED_TYPE_GENERIC => CredType.Generic,
             CRED_TYPE.CRED_TYPE_GENERIC_CERTIFICATE => CredType.GenericCertificate,
@@ -389,5 +400,25 @@ file static class PInvokeExtensions
             CRED_TYPE.CRED_TYPE_DOMAIN_EXTENDED => CredType.DomainExtended,
             _ => CredType.Unknown,
         };
+
+    /// <summary>資格情報のBLOB領域をクリアする</summary>
+    /// <param name="credPtr">API資格情報</param>
+    private unsafe void clearBlob(CREDENTIALW* credPtr)
+    {
+        if (credPtr->CredentialBlob != null)
+        {
+            var blobSpan = new Span<byte>(credPtr->CredentialBlob, (int)credPtr->CredentialBlobSize);
+            blobSpan.Clear();
+        }
+    }
+    #endregion
+}
+
+/// <summary>P/Invoke 関連定数</summary>
+file static class PInvokeConstants
+{
+    /// <summary>更新データフラグ：BLOBを維持した更新</summary>
+    public const uint CRED_PRESERVE_CREDENTIAL_BLOB = 0x00000001;
+
 }
 
